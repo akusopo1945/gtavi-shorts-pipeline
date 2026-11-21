@@ -1,0 +1,38 @@
+{
+  "windah": {
+    "name": "Windah Basudara",
+    "badge_color": "bg-blue-600 text-white",
+    "facecam_normal": "crop=356:270:1595:615,scale=1080:820:flags=lanczos,unsharp=5:5:0.8:5:5:0.0",
+    "facecam_zoom": "crop=238:180:1640:660,scale=1080:820:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
+    "gameplay": "crop=1440:1080:0:0,scale=1080:980:flags=lanczos,unsharp=5:5:0.6:5:5:0.0",
+    "seam_color_top": "0xec4899",
+    "seam_color_bottom": "0x06b6d4",
+    "seam_color_bg": "0x080c16",
+    "font_title": "Bebas Neue Bold",
+    "font_size": 44
+  },
+  "tara": {
+    "name": "Tara Arts Game Indonesia",
+    "badge_color": "bg-amber-600 text-white",
+    "facecam_normal": "crop=440:330:30:30,scale=1080:820:flags=lanczos,unsharp=5:5:0.8:5:5:0.0",
+    "facecam_zoom": "crop=300:225:100:80,scale=1080:820:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
+    "gameplay": "crop=1440:1080:480:0,scale=1080:980:flags=lanczos,unsharp=5:5:0.6:5:5:0.0",
+    "seam_color_top": "0xf59e0b",
+    "seam_color_bottom": "0x10b981",
+    "seam_color_bg": "0x0f172a",
+    "font_title": "Bebas Neue Bold",
+    "font_size": 44
+  },
+  "default": {
+    "name": "Gaming Streamer",
+    "badge_color": "bg-purple-600 text-white",
+    "facecam_normal": "crop=356:270:1595:615,scale=1080:820:flags=lanczos",
+    "facecam_zoom": "crop=238:180:1640:660,scale=1080:820:flags=lanczos",
+    "gameplay": "crop=1440:1080:0:0,scale=1080:980:flags=lanczos",
+    "seam_color_top": "0x8b5cf6",
+    "seam_color_bottom": "0x3b82f6",
+    "seam_color_bg": "0x0f172a",
+    "font_title": "Bebas Neue Bold",
+    "font_size": 44
+  }
+}

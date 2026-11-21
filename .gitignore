@@ -1,8 +1,11 @@
 .venv/
+venv/
 __pycache__/
 jobs/
 test/
 *.mp4
 *.wav
 *.ts
+*.mov
+*.part
 !docs/*.mp4
