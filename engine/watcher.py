@@ -159,7 +159,7 @@ class LiveMonitor:
         avg_baseline_10s = (baseline_60s / 6) if baseline_60s > 0 else 5
         
         ratio = recent_10s / max(1.0, avg_baseline_10s)
-        # Spike terdeteksi jika chat tawa melonjak 3x lipat dan minimal ada 15 poin hype
+        # Spike terdeteksi jika chat tawa melonjak 2.8x lipat dan minimal ada 15 poin hype
         if ratio >= 2.8 and recent_10s >= 15:
             self.last_spike_time = now_s
             return True, ratio
@@ -171,20 +171,16 @@ class LiveMonitor:
         print(f"\n[🔥] SPIKE DETECTED! (Ratio: {ratio:.1f}x) Producing clip: {clip_id}")
         
         send_message(
-            f"🔥 *[MOMEN VIRAL TERDETEKSI!]*\n"
+            f"🔥 *[MOMEN VIRAL LIVE TERDETEKSI!]*\n"
             f"Streamer: *{self.title}*\n"
-            f"Lonjakan Tawa: `{ratio:.1f}x dari baseline`\n"
-            f"⏳ Sedang memotong 55 detik & auto-rendering 1080p 60fps..."
+            f"Lonjakan Tawa: `{ratio:.1f}x dari baseline normal`\n"
+            f"⏳ Merekam 55 detik stream & render 1080p 60fps..."
         )
         
-        # Eksekusi engine clipper
         clip_work = self.job_dir / clip_id
         clip_work.mkdir(parents=True, exist_ok=True)
+        raw_video = clip_work / "raw.mp4"
         
-        # Ambil 55 detik terakhir dari live stream
-        now_s = int(time.time())
-        # Misal stream dimulai t=start, range yt-dlp live dvr:
-        # Gunakan command clipper dengan download section
         clipper_cmd = [
             sys.executable, str(ENGINE_DIR / "clipper.py"),
             "--id", clip_id,
@@ -197,22 +193,35 @@ class LiveMonitor:
         ]
         
         try:
-            # Unduh slice 55s terakhir
-            raw_video = clip_work / "raw.mp4"
-            dl_cmd = [
+            # 1. Dapatkan live stream URL (HLS m3u8) langsung via yt-dlp
+            print("[*] Resolving live stream HLS URL via yt-dlp...")
+            get_url_cmd = [
                 sys.executable, "-m", "yt_dlp",
-                "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-                "--live-from-start",
-                "--download-sections", "*-55-inf",
-                "-o", str(raw_video),
-                self.watch_url
+                "-f", "301/300/best[ext=mp4]/best",
+                "-g", self.watch_url
             ]
             if COOKIES_PATH.exists():
-                dl_cmd.extend(["--cookies", str(COOKIES_PATH)])
-            subprocess.run(dl_cmd, check=True, timeout=90)
+                get_url_cmd.extend(["--cookies", str(COOKIES_PATH)])
+            if os.path.exists("/usr/local/bin/node"):
+                get_url_cmd.extend(["--js-runtimes", "node:/usr/local/bin/node"])
+                
+            stream_url = subprocess.check_output(get_url_cmd, text=True, timeout=30).strip()
             
-            # Jalankan render engine
-            subprocess.run(clipper_cmd, check=True, timeout=120)
+            # 2. Rekam 55 detik stream via FFmpeg copy
+            print(f"[*] Recording 55 seconds live slice to {raw_video}...")
+            ffmpeg_dl_cmd = [
+                "ffmpeg", "-y",
+                "-t", "55",
+                "-i", stream_url,
+                "-c", "copy",
+                str(raw_video)
+            ]
+            subprocess.run(ffmpeg_dl_cmd, check=True, timeout=90)
+            print("[+] Live slice successfully recorded!")
+            
+            # 3. Jalankan render engine clipper
+            print("[*] Running declarative clipper pipeline...")
+            subprocess.run(clipper_cmd, check=True, timeout=180)
             
             rendered_video = clip_work / f"{clip_id}_rendered.mp4"
             thumb_path = clip_work / "thumb.jpg"
@@ -220,8 +229,9 @@ class LiveMonitor:
             if rendered_video.exists():
                 send_video(
                     str(rendered_video),
-                    caption=f"🎬 *Momen Live #{self.clip_count} Siap!* 🔥\n\n"
+                    caption=f"🎬 *Momen Live #{self.clip_count} Berhasil Diproduksi!* 🔥\n\n"
                             f"📌 Title: MOMEN SPONTAN LIVE GTA 6 #{self.clip_count}\n"
+                            f"⏱️ Resolusi: 1080x1920 (60 FPS)\n"
                             f"🔗 Web: https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/",
                     thumb_path=str(thumb_path) if thumb_path.exists() else None
                 )
@@ -238,7 +248,7 @@ class LiveMonitor:
 def run_watcher_loop(streamer_target="windah"):
     cfg = CHANNELS.get(streamer_target, CHANNELS["windah"])
     print(f"=== Auto-Watcher Daemon Active: {cfg['name']} ===")
-    send_message(f"🤖 *Auto-Watcher Luna Aktif!*\nMemantau channel: *{cfg['name']}* setiap 60 detik.")
+    send_message(f"🤖 *Auto-Watcher Luna Aktif!*\\nMemantau livestream: *{cfg['name']}* secara real-time.")
     
     active_monitor = None
     try:
@@ -258,7 +268,6 @@ def run_watcher_loop(streamer_target="windah"):
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {cfg['name']} is offline. Polling in 60s...", end="\r")
                     time.sleep(60)
             else:
-                # Sedang memantau stream yang aktif
                 active_monitor.poll_chat()
                 is_spike, ratio = active_monitor.check_spike()
                 if is_spike:
