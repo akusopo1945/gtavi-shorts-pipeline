@@ -7,6 +7,7 @@ Portabel untuk Linux VPS / DevContainer / Sandbox.
 import os
 import sys
 import json
+import time
 import argparse
 import subprocess
 from pathlib import Path
@@ -15,6 +16,27 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 PROFILES_FILE = Path(__file__).resolve().parent / "profiles.json"
 WEB_DIR = Path("/data/html/clips")
+STAGE_FILE = BASE_DIR / ".job_stage.json"
+
+def update_stage(stage, percent, detail, slug=None):
+    data = {}
+    if STAGE_FILE.exists():
+        try:
+            data = json.loads(STAGE_FILE.read_text(encoding="utf-8"))
+        except:
+            pass
+    if slug:
+        data["slug"] = slug
+    data.update({
+        "stage": stage,
+        "percent": percent,
+        "detail": detail,
+        "updated_at": time.time()
+    })
+    try:
+        STAGE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except:
+        pass
 
 def parse_time_to_seconds(t_str):
     parts = list(map(float, t_str.split(':')))
@@ -42,9 +64,18 @@ def run_download(url, time_range, output_path, cookies_path=None):
         "-o", str(output_path),
         url
     ]
-    if cookies_path and os.path.exists(cookies_path):
-        cmd.extend(["--cookies", str(cookies_path)])
     
+    # Check cookies
+    possible_cookies = [
+        cookies_path,
+        str(BASE_DIR / "cookies.txt"),
+        "/data/home/Downloads/www.youtube.com_cookies.txt"
+    ]
+    for c in possible_cookies:
+        if c and os.path.exists(c):
+            cmd.extend(["--cookies", str(c)])
+            break
+            
     # Check node for js runtimes
     if os.path.exists("/usr/local/bin/node"):
         cmd.extend(["--js-runtimes", "node:/usr/local/bin/node"])
@@ -56,7 +87,7 @@ def run_transcribe(input_video, output_ass):
     print("[*] Transcribing audio with faster-whisper...")
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel('small', device='cpu', compute_type='int8')
+        model = WhisperModel('base', device='cpu', compute_type='int8')
         segments, info = model.transcribe(str(input_video), language='id', beam_size=5)
         
         ass_header = """[Script Info]
@@ -75,6 +106,7 @@ Style: Magenta,Bebas Neue,62,&H003333FF,&H000000FF,&H00000000,&H80000000,1,0,0,0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         lines = [ass_header]
+        count = 0
         for s in segments:
             def fmt_time(sec):
                 m, sec = divmod(sec, 60)
@@ -83,20 +115,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 return f"{int(h)}:{int(m):02d}:{int(sec):02d}.{cs:02d}"
             
             clean_text = s.text.strip().upper()
-            lines.append(f"Dialogue: 0,{fmt_time(s.start)},{fmt_time(s.end)},Default,,0,0,0,,{clean_text}\n")
+            if clean_text:
+                lines.append(f"Dialogue: 0,{fmt_time(s.start)},{fmt_time(s.end)},Default,,0,0,0,,{clean_text}\n")
+                count += 1
             
         with open(output_ass, 'w', encoding='utf-8') as f:
             f.writelines(lines)
-        print(f"[+] Subtitle ASS generated: {output_ass}")
+        print(f"[+] Subtitle ASS generated: {output_ass} ({count} dialogue lines)")
     except Exception as e:
         print(f"[!] Warning: faster-whisper failed: {e}. Skipping auto-transcribe.")
 
-def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, zoom_expr="0", sfx_list=None):
+def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, work_dir, zoom_expr="0", sfx_list=None):
     profiles = load_profiles()
     prof = profiles.get(streamer, profiles.get("default"))
     
-    # Base filtergraph
-    # Scale input to 1920x1080 if needed for standard coordinate crop
+    # Save title to textfile to avoid ANY FFmpeg escaping bugs (colons, quotes, etc)
+    title_file = work_dir / "title.txt"
+    title_file.write_text(title, encoding="utf-8")
+    
     filter_parts = [
         f"[0:v]scale=1920:1080:flags=lanczos,fps=60,setpts=PTS-STARTPTS,split=3[cam_normal_in][cam_zoom_in][game_in];",
         f"[cam_normal_in]{prof['facecam_normal']}[top_normal];",
@@ -109,7 +145,7 @@ def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, 
         f"[tmp2]drawbox=y=820:w=1080:h=120:color={prof['seam_color_bg']}@1.0:t=fill,",
         f"drawbox=y=820:w=1080:h=5:color={prof['seam_color_top']}@1.0:t=fill,",
         f"drawbox=y=935:w=1080:h=5:color={prof['seam_color_bottom']}@1.0:t=fill,",
-        f"drawtext=font='{prof['font_title']}':text='{title}':fontcolor=white:fontsize={prof['font_size']}:",
+        f"drawtext=font='{prof['font_title']}':textfile='{title_file}':fontcolor=white:fontsize={prof['font_size']}:",
         f"bordercolor=black:borderw=3:shadowcolor=black@0.9:shadowx=4:shadowy=4:",
         f"x=(w-text_w)/2:y=820+(120-text_h)/2[base_vid];"
     ]
@@ -125,14 +161,15 @@ def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, 
         filter_parts.append(f"[1:v]scale=180:-1[logo];[{current_v}][logo]overlay=W-w-40:40[with_logo];")
         current_v = "with_logo"
         
-    filter_parts.append(f"[{current_v}]ass='{ass_file}'[v];")
+    if ass_file and os.path.exists(ass_file) and os.path.getsize(ass_file) > 0:
+        filter_parts.append(f"[{current_v}]ass='{ass_file}'[v];")
+    else:
+        filter_parts.append(f"[{current_v}]null[v];")
     
     # Audio setup
     filter_parts.append("[0:a]asetpts=PTS-STARTPTS[a_stream];")
     audio_inputs = ["[a_stream]"]
     
-    # Parse SFX list e.g. "whoosh@10.0,wow@25.5,boom@35.0,faah@53.0"
-    sfx_count = 0
     if sfx_list:
         items = sfx_list.split(',')
         for idx, item in enumerate(items):
@@ -151,7 +188,6 @@ def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, 
                 tag = f"sfx_{idx}"
                 filter_parts.append(f"[{sfx_idx}:a]adelay={t_ms}|{t_ms},volume=1.1[{tag}];")
                 audio_inputs.append(f"[{tag}]")
-                sfx_count += 1
                 
     if len(audio_inputs) > 1:
         mix_inputs = "".join(audio_inputs)
@@ -252,7 +288,7 @@ def main():
     parser.add_argument("--range", help="Time range e.g. 02:14:10-02:15:05")
     parser.add_argument("--streamer", default="windah", help="Streamer key in profiles.json")
     parser.add_argument("--title", required=True, help="Seam bar main title")
-    parser.add_argument("--duration", type=float, default=55.0, help="Target duration in seconds")
+    parser.add_argument("--duration", type=float, default=50.0, help="Target duration in seconds")
     parser.add_argument("--zoom", default="0", help="Zoom expression for FFmpeg enable")
     parser.add_argument("--sfx", help="Comma-separated sfx@seconds e.g. whoosh@10,boom@35,faah@53")
     parser.add_argument("--id", required=True, help="Clip unique ID slug")
@@ -266,43 +302,58 @@ def main():
     work_dir = Path(args.workdir) if args.workdir else BASE_DIR / "jobs" / args.id
     work_dir.mkdir(parents=True, exist_ok=True)
     
-    raw_video = work_dir / "raw.mp4"
-    if args.url and args.range and not raw_video.exists():
-        run_download(args.url, args.range, raw_video, args.cookies)
+    try:
+        raw_video = work_dir / "raw.mp4"
+        if args.url and args.range and not raw_video.exists():
+            update_stage("downloading", 15, f"Mengunduh video stream ({args.range}) via yt-dlp...", slug=args.id)
+            run_download(args.url, args.range, raw_video, args.cookies)
+            
+        ass_file = work_dir / "subs.ass"
+        if not ass_file.exists() and raw_video.exists():
+            update_stage("transcribing", 35, "AI transkripsi audio ke subtitle ASS...", slug=args.id)
+            run_transcribe(raw_video, ass_file)
+            
+        out_video = work_dir / f"{args.id}_rendered.mp4"
+        cmd = build_render_cmd(
+            raw_video=raw_video,
+            ass_file=ass_file,
+            streamer=args.streamer,
+            title=args.title,
+            out_video=out_video,
+            duration=args.duration,
+            work_dir=work_dir,
+            zoom_expr=args.zoom,
+            sfx_list=args.sfx
+        )
         
-    ass_file = work_dir / "subs.ass"
-    if not ass_file.exists() and raw_video.exists():
-        run_transcribe(raw_video, ass_file)
+        update_stage("rendering", 50, "Rendering 1080x1920 @ 60fps dengan FFmpeg...", slug=args.id)
+        print("[*] Rendering with unified FFmpeg pipeline...")
+        subprocess.run(cmd, check=True)
         
-    out_video = work_dir / f"{args.id}_rendered.mp4"
-    cmd = build_render_cmd(
-        raw_video=raw_video,
-        ass_file=ass_file,
-        streamer=args.streamer,
-        title=args.title,
-        out_video=out_video,
-        duration=args.duration,
-        zoom_expr=args.zoom,
-        sfx_list=args.sfx
-    )
-    
-    print("[*] Rendering with unified FFmpeg pipeline...")
-    subprocess.run(cmd, check=True)
-    
-    st = os.stat(out_video)
-    size_mb = st.st_size / (1024 * 1024)
-    print(f"[+] Render complete: {out_video} ({size_mb:.1f} MB)")
-    
-    deploy_to_portal(
-        clip_id=args.id,
-        out_video=out_video,
-        title=args.title,
-        summary=args.summary or args.title,
-        copy_text=args.copywriting or args.title,
-        duration_str=f"{args.duration:.1f}s",
-        size_str=f"{size_mb:.1f} MB",
-        streamer=args.streamer
-    )
+        st = os.stat(out_video)
+        size_mb = st.st_size / (1024 * 1024)
+        print(f"[+] Render complete: {out_video} ({size_mb:.1f} MB)")
+        
+        update_stage("deploying", 95, "Menyimpan ke portal dan patching faststart streaming...", slug=args.id)
+        deploy_to_portal(
+            clip_id=args.id,
+            out_video=out_video,
+            title=args.title,
+            summary=args.summary or args.title,
+            copy_text=args.copywriting or args.title,
+            duration_str=f"{args.duration:.1f}s",
+            size_str=f"{size_mb:.1f} MB",
+            streamer=args.streamer
+        )
+        
+        update_stage("done", 100, f"Klip selesai diproduksi! ({size_mb:.1f} MB)", slug=args.id)
+        print("[+] All pipeline tasks completed successfully!")
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        update_stage("error", 0, f"Error pipeline: {str(e)}", slug=args.id)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
