@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Luna GTA Shorts Telegram Interactive AI Command Center
-High-Performance Architecture:
-- Persistent HTTP Connection Pooling (requests.Session)
-- Instant Chat Action Typing Indicator
-- Non-blocking Asynchronous Task Dispatcher
+High-Performance Architecture with Live Video Render Progress Tracker
 """
 
 import os
@@ -20,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ENGINE_DIR = BASE_DIR / "engine"
 PID_FILE = BASE_DIR / ".watcher.pid"
 ENV_FILE = BASE_DIR / ".env"
+PROGRESS_FILE = BASE_DIR / ".render_progress.txt"
 WEB_DIR = Path("/data/html/clips")
 
 sys.path.insert(0, str(ENGINE_DIR))
@@ -40,7 +38,6 @@ ENV = load_env()
 TOKEN = ENV.get("TELEGRAM_BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-# 1. Persistent HTTP Connection Session (Zero SSL Re-handshake overhead)
 HTTP_SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=2)
 HTTP_SESSION.mount("https://", adapter)
@@ -57,7 +54,6 @@ def api_post(method, data=None, files=None):
         return {"ok": False, "error": str(e)}
 
 def send_typing(chat_id):
-    """Kirim sinyal visual typing seketika."""
     try:
         HTTP_SESSION.post(f"{API_URL}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}, timeout=2)
     except:
@@ -66,6 +62,7 @@ def send_typing(chat_id):
 def register_bot_commands():
     commands = [
         {"command": "help", "description": "Panduan & fitur lengkap Luna AI"},
+        {"command": "progress", "description": "Pantau proses render video yang sedang berjalan"},
         {"command": "status", "description": "Status auto-watcher & server"},
         {"command": "watch_on", "description": "Nyalakan pemantau live 24/7"},
         {"command": "watch_off", "description": "Matikan pemantau live"},
@@ -73,6 +70,48 @@ def register_bot_commands():
         {"command": "clip", "description": "Potong manual: /clip <url> <range> <title>"}
     ]
     api_post("setMyCommands", {"commands": commands})
+
+def is_render_active():
+    """Cek apakah ada proses ffmpeg / clipper yang sedang rendering."""
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "clipper.py|ffmpeg.*libx264"], text=True)
+        return bool(out.strip())
+    except subprocess.CalledProcessError:
+        return False
+
+def get_render_progress_info():
+    if not is_render_active():
+        return None
+        
+    info = {"frame": 0, "fps": "0", "speed": "0x", "out_time": "00:00:00", "percent": 0}
+    if PROGRESS_FILE.exists():
+        try:
+            content = PROGRESS_FILE.read_text()
+            data = {}
+            for line in content.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    data[k.strip()] = v.strip()
+                    
+            frame = int(data.get("frame", 0))
+            fps = data.get("fps", "0")
+            speed = data.get("speed", "1x")
+            out_time = data.get("out_time", "00:00:00").split(".")[0]
+            
+            # Asumsi standar video shorts 50s @ 60fps = 3000 frames
+            total_frames = 3000
+            percent = min(99, int((frame / total_frames) * 100))
+            
+            info.update({
+                "frame": frame,
+                "fps": fps,
+                "speed": speed,
+                "out_time": out_time,
+                "percent": percent
+            })
+        except Exception:
+            pass
+    return info
 
 def is_watcher_running():
     if not PID_FILE.exists():
@@ -125,7 +164,7 @@ def handle_text_prompt(chat_id, user_text):
                     {"text": "⚡ Render Gaya Clean", "callback_data": f"render:clean:{target_time}"}
                 ],
                 [
-                    {"text": "📊 Cek Status Server", "callback_data": "cmd:status"},
+                    {"text": "⏳ Cek Progress", "callback_data": "cmd:progress"},
                     {"text": "🌐 Buka Portal Web", "url": "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"}
                 ]
             ]
@@ -152,8 +191,11 @@ def handle_callback_query(cq):
         _, style, t_point = data.split(":")
         api_post("sendMessage", {
             "chat_id": chat_id,
-            "text": f"⏳ *Memulai Produksi AI Clipper*\n• Gaya: *{style.upper()}*\n• Timestamp: `{t_point}`\n\nSedang memotong dan merender 1080p 60fps...",
-            "parse_mode": "Markdown"
+            "text": f"⏳ *Memulai Produksi Video*\n• Gaya: *{style.upper()}*\n• Timestamp: `{t_point}`\n\nKetik `/progress` atau klik tombol di bawah untuk pantau render:",
+            "parse_mode": "Markdown",
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "⏳ Cek Progress Live", "callback_data": "cmd:progress"}]]
+            }
         })
         
         slug = f"ai_{style}_{int(time.time())}"
@@ -170,6 +212,8 @@ def handle_callback_query(cq):
         h_e, m_e = divmod(m_e, 60)
         range_str = f"{h_s:02d}:{m_s:02d}:{sec_s:02d}-{h_e:02d}:{m_e:02d}:{sec_e:02d}"
         
+        # Bersihkan file progress lama
+        PROGRESS_FILE.unlink(missing_ok=True)
         subprocess.Popen([
             sys.executable, str(ENGINE_DIR / "clipper.py"),
             "--id", slug,
@@ -181,6 +225,8 @@ def handle_callback_query(cq):
         ])
     elif data == "cmd:status":
         handle_command(chat_id, "/status")
+    elif data == "cmd:progress":
+        handle_command(chat_id, "/progress")
     elif data == "cmd:clips":
         handle_command(chat_id, "/clips")
     elif data == "cmd:watch_on":
@@ -194,7 +240,43 @@ def handle_command(chat_id, text):
     cmd = parts[0].lower().split('@')[0]
     args = parts[1:]
 
-    if cmd in ("/start", "/help"):
+    if cmd == "/progress":
+        prog = get_render_progress_info()
+        if not prog:
+            msg = (
+                "☕ *STATUS RENDER: IDLE*\n\n"
+                "Saat ini tidak ada video yang sedang diproses.\n"
+                "Semua antrian render selesai!"
+            )
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🎬 Lihat Klip Terbaru", "callback_data": "cmd:clips"},
+                     {"text": "🌐 Buka Portal", "url": "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"}]
+                ]
+            }
+        else:
+            pct = prog["percent"]
+            bar_len = 10
+            filled = int((pct / 100) * bar_len)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            
+            msg = (
+                "⚙️ *PROGRES RENDER VIDEO LIVE:*\n\n"
+                f"Status: `Rendering 1080x1920 @ 60fps`\n"
+                f"`[{bar}]` *{pct}%*\n\n"
+                f"• Frame: `{prog['frame']} / 3000`\n"
+                f"• Kecepatan: `{prog['fps']} fps ({prog['speed']})`\n"
+                f"• Waktu Terproses: `{prog['out_time']}`\n\n"
+                "_(Klik tombol Refresh untuk update status)_"
+            )
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🔄 Refresh Progress", "callback_data": "cmd:progress"}]
+                ]
+            }
+        api_post("sendMessage", {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown", "reply_markup": keyboard})
+
+    elif cmd in ("/start", "/help"):
         msg = (
             "🤖 *LUNA AI CONTENT STUDIO - COMMAND CENTER*\n\n"
             "✨ *Fitur Chat Bahasa Alami*\n"
@@ -203,7 +285,8 @@ def handle_command(chat_id, text):
             "• _\"Potongin bagian parasut dong\"_\n"
             "• _\"Bikinin caption buat konten mandi\"_\n\n"
             "⚡ *Perintah Cepat:* \n"
-            "• `/status` - Cek watcher & storage server\n"
+            "• `/progress` - Cek proses render video saat ini\n"
+            "• `/status` - Cek status watcher & server\n"
             "• `/watch_on` - Aktifkan auto-watcher live\n"
             "• `/watch_off` - Matikan auto-watcher\n"
             "• `/clips` - Lihat 5 klip terbaru di portal\n"
@@ -212,11 +295,14 @@ def handle_command(chat_id, text):
         keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "📊 Status Server", "callback_data": "cmd:status"},
+                    {"text": "⏳ Cek Progress", "callback_data": "cmd:progress"},
+                    {"text": "📊 Status Server", "callback_data": "cmd:status"}
+                ],
+                [
+                    {"text": "🔴 Watcher ON", "callback_data": "cmd:watch_on"},
                     {"text": "🎬 Klip Terbaru", "callback_data": "cmd:clips"}
                 ],
                 [
-                    {"text": "🔴 Nyalakan Watcher", "callback_data": "cmd:watch_on"},
                     {"text": "🌐 Buka Web Portal", "url": "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"}
                 ]
             ]
@@ -226,6 +312,7 @@ def handle_command(chat_id, text):
     elif cmd == "/status":
         running, pid = is_watcher_running()
         status_text = f"🟢 *AKTIF* (PID: `{pid}`)" if running else "🔴 *NONAKTIF*"
+        render_text = "⚙️ *Sedang Render Video...*" if is_render_active() else "☕ *IDLE (Siap)*"
         
         total_clips = 0
         if (WEB_DIR / "files").exists():
@@ -233,8 +320,8 @@ def handle_command(chat_id, text):
             
         msg = (
             "📊 *STATUS SISTEM LUNA AI*\n\n"
+            f"• Engine Render: {render_text}\n"
             f"• Auto-Watcher: {status_text}\n"
-            f"• AI Brain: 🟢 *In-Memory Caching (Ultra-Fast)*\n"
             f"• Target Default: `Windah Basudara`\n"
             f"• Total Klip di Portal: `{total_clips} klip`\n"
             f"• Output Format: `1080x1920 60 FPS (Faststart)`\n\n"
@@ -243,9 +330,12 @@ def handle_command(chat_id, text):
         keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "🔴 Nyalakan Watcher" if not running else "🛑 Matikan Watcher", 
-                     "callback_data": "cmd:watch_on" if not running else "cmd:watch_off"},
-                    {"text": "🌐 Lihat Portal", "url": "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"}
+                    {"text": "⏳ Cek Progress Video", "callback_data": "cmd:progress"},
+                    {"text": "🔴 Watcher ON" if not running else "🛑 Watcher OFF", 
+                     "callback_data": "cmd:watch_on" if not running else "cmd:watch_off"}
+                ],
+                [
+                    {"text": "🌐 Buka Portal Web", "url": "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"}
                 ]
             ]
         }
@@ -290,14 +380,21 @@ def handle_command(chat_id, text):
         url, rng = args[0], args[1]
         title = " ".join(args[2:])
         slug = f"manual_{int(time.time())}"
-        api_post("sendMessage", {"chat_id": chat_id, "text": f"⏳ Memproses klip *{title}*...", "parse_mode": "Markdown"})
+        
+        PROGRESS_FILE.unlink(missing_ok=True)
+        api_post("sendMessage", {
+            "chat_id": chat_id, 
+            "text": f"⏳ Memproses klip *{title}*...\nKetik `/progress` untuk cek status render.",
+            "parse_mode": "Markdown",
+            "reply_markup": {"inline_keyboard": [[{"text": "⏳ Cek Progress", "callback_data": "cmd:progress"}]]}
+        })
         subprocess.Popen([
             sys.executable, str(ENGINE_DIR / "clipper.py"),
             "--id", slug, "--url", url, "--range", rng, "--title", title, "--streamer", "windah", "--duration", "55.0"
         ])
 
 def run_bot_server():
-    print("=== Luna AI Telegram Command Center (Optimized HTTP Keep-Alive) Started ===")
+    print("=== Luna AI Telegram Command Center (Live Progress Tracking) Started ===")
     register_bot_commands()
     
     last_update_id = 0
@@ -318,6 +415,7 @@ def run_bot_server():
                         continue
                         
                     chat_id = msg["chat"]["id"]
+                    
                     if "text" in msg:
                         text = msg["text"]
                         print(f"[*] Message from {chat_id}: {text}")

@@ -178,6 +178,7 @@ def build_render_cmd(raw_video, ass_file, streamer, title, out_video, duration, 
         "-b:a", "192k",
         "-ar", "48000",
         "-movflags", "+faststart",
+        "-progress", str(BASE_DIR / ".render_progress.txt"),
         "-t", str(duration),
         str(out_video)
     ]
