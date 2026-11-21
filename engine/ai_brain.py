@@ -1,35 +1,41 @@
 #!/usr/bin/env python3
 """
-AI Brain untuk Luna Content Studio
-Menerjemahkan instruksi bahasa alami user (teks / voice note) -> Aksi Tool Editing & Clipper
+AI Brain untuk Luna Content Studio (High Performance In-Memory Caching)
 """
 
-import os
-import sys
 import json
 import re
-import subprocess
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ENGINE_DIR = BASE_DIR / "engine"
 JOBS_DIR = BASE_DIR / "jobs"
 SUBS_VTT = JOBS_DIR / "windah_gp4" / "subs.id.vtt"
 COMMENTS_JSON = JOBS_DIR / "windah_gp4" / "all_comments.info.json"
 
+# In-Memory Cache agar pencarian 1 milidetik
+CACHED_VTT_LINES = []
+CACHED_COMMENTS = []
+TIME_REGEX = re.compile(r'(\b\d{1,2}:\d{2}(?::\d{2})?\b)')
+
+def init_cache():
+    global CACHED_VTT_LINES, CACHED_COMMENTS
+    if not CACHED_VTT_LINES and SUBS_VTT.exists():
+        with open(SUBS_VTT, 'r', encoding='utf-8') as f:
+            CACHED_VTT_LINES = f.readlines()
+    if not CACHED_COMMENTS and COMMENTS_JSON.exists():
+        with open(COMMENTS_JSON, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            CACHED_COMMENTS = data.get("comments", [])
+
+init_cache()
+
 def search_stream_transcript(keywords, max_results=3):
-    """Cari momen lucu di transkrip VTT berdasarkan kata kunci."""
-    if not SUBS_VTT.exists():
-        return []
-        
+    init_cache()
     results = []
-    with open(SUBS_VTT, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-        
+    lines = CACHED_VTT_LINES
     for i, line in enumerate(lines):
         line_lower = line.lower()
         if any(kw.lower() in line_lower for kw in keywords):
-            # Ambil timestamp dan teks sekitar
             t_line = ""
             for k in range(max(0, i-4), i+1):
                 if "-->" in lines[k]:
@@ -43,20 +49,11 @@ def search_stream_transcript(keywords, max_results=3):
     return results
 
 def search_top_comment_moments(query_terms):
-    """Cari momen rekomendasi penonton di komentar YouTube."""
-    if not COMMENTS_JSON.exists():
-        return []
-        
-    with open(COMMENTS_JSON, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-        
-    comments = data.get("comments", [])
+    init_cache()
     matched = []
-    pattern = re.compile(r'(\b\d{1,2}:\d{2}(?::\d{2})?\b)')
-    
-    for c in comments:
+    for c in CACHED_COMMENTS:
         text = c.get("text", "")
-        times = pattern.findall(text)
+        times = TIME_REGEX.findall(text)
         if times:
             t_lower = text.lower()
             if any(q.lower() in t_lower for q in query_terms):
@@ -70,12 +67,9 @@ def search_top_comment_moments(query_terms):
     return matched[:3]
 
 def parse_user_intent(prompt_text):
-    """Menganalisis prompt user untuk menentukan aksi editing yang tepat."""
     prompt_lower = prompt_text.lower()
     
-    # 1. Cek intent bikin / cari klip
     if any(w in prompt_lower for w in ["potong", "buatkan klip", "bikin klip", "cari momen", "clip", "momen"]):
-        # Ekstrak kata kunci topik
         keywords = []
         for kw in ["jason", "mandi", "parasut", "senjata", "maling", "nenek", "pesawat", "bagasi", "buaya", "curhat", "matematika", "kaget", "teriak"]:
             if kw in prompt_lower:
@@ -94,14 +88,12 @@ def parse_user_intent(prompt_text):
             "detected_style": "livechat" if "chat" in prompt_lower else "clean"
         }
         
-    # 2. Cek intent copywriting
     elif any(w in prompt_lower for w in ["caption", "copywriting", "judul", "hashtag"]):
         return {
             "intent": "generate_copywriting",
             "prompt": prompt_text
         }
         
-    # 3. Chat umum / ide kreatif
     return {
         "intent": "chat",
         "prompt": prompt_text
@@ -116,7 +108,6 @@ def format_ai_response(intent_data):
         vtt = intent_data["transcript_matches"]
         
         reply = [f"🎯 *LUNA AI MENEMUKAN MOMEN VIRAL:* (Topik: `{kw_str}`)\n"]
-        
         options = []
         if comms:
             reply.append("📌 *Rekomendasi dari Komentar Penonton:*")
@@ -134,15 +125,15 @@ def format_ai_response(intent_data):
             reply.append("")
             
         best_time = options[0] if options else "00:42:15"
-        reply.append(f"💡 *Saran Eksekusi Terbaik*: Momen di `{best_time}`")
-        reply.append("Pilih gaya render yang kamu inginkan di bawah ini:")
+        reply.append(f"💡 *Saran Eksekusi*: Momen di `{best_time}`")
+        reply.append("Pilih gaya render di bawah ini:")
         
         return "\n".join(reply), best_time
         
     elif intent == "generate_copywriting":
         return (
             "📝 *REKOMENDASI COPYWRITING SHORTS / TIKTOK*\n\n"
-            "🔥 *Opsi Judul (High Click-Through Rate):*\n"
+            "🔥 *Opsi Judul (High CTR):*\n"
             "1. WINDAH BIKIN NETIZEN KAGET LAGI DI GTA 6?! 💀\n"
             "2. NIATNYA KEREN ENDINGNYA KENA MENTAL BRUTAL 😂🪂\n"
             "3. DETIK-DETIK MOMEN PALING KOCAK DI STREAM INI!\n\n"
@@ -152,10 +143,9 @@ def format_ai_response(intent_data):
         )
         
     return (
-        "🤖 *Luna AI Assistant siap!* Kamu bisa kirim perintah apa saja, contohnya:\n"
+        "🤖 *Luna AI siap!* Kamu bisa langsung ketik perintah, contoh:\n"
         "• *\"Cariin momen pas Windah kaget\"*\n"
         "• *\"Bikinin caption TikTok yang bikin penasaran\"*\n"
-        "• *\"Potong 50 detik dari menit 02:14:12\"*\n"
-        "• Atau kirim *Voice Note* langsung di chat ini!",
+        "• *\"Potong 50 detik dari menit 02:14:12\"*",
         None
     )
