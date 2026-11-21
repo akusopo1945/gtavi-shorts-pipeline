@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Luna GTA Shorts Telegram Interactive AI Command Center
+Ringan & Cepat (Tanpa dependensi Voice Note / Audio Loading di Bot Loop)
 Mendukung:
 - Natural Language AI Assistant
-- Voice Note to Video Transcription
 - Interactive Inline Keyboard Buttons
 - Watcher Daemon On/Off via Chat
 """
@@ -22,8 +22,6 @@ ENGINE_DIR = BASE_DIR / "engine"
 PID_FILE = BASE_DIR / ".watcher.pid"
 ENV_FILE = BASE_DIR / ".env"
 WEB_DIR = Path("/data/html/clips")
-TEMP_DIR = BASE_DIR / "jobs" / "temp_voice"
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(ENGINE_DIR))
 import ai_brain
@@ -42,7 +40,6 @@ def load_env():
 ENV = load_env()
 TOKEN = ENV.get("TELEGRAM_BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
-FILE_API_URL = f"https://api.telegram.org/file/bot{TOKEN}"
 
 def api_post(method, data=None, files=None):
     try:
@@ -103,37 +100,10 @@ def stop_watcher():
         PID_FILE.unlink(missing_ok=True)
         return False, f"Error mematikan watcher: {e}"
 
-def transcribe_voice_message(file_id):
-    """Unduh voice note telegram dan transkripsikan dengan faster-whisper."""
-    try:
-        res = api_post("getFile", {"file_id": file_id})
-        if not res.get("ok"):
-            return None
-        file_path = res["result"]["file_path"]
-        download_url = f"{FILE_API_URL}/{file_path}"
-        
-        ogg_path = TEMP_DIR / f"voice_{int(time.time())}.oga"
-        with requests.get(download_url, stream=True) as r:
-            with open(ogg_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    
-        # Transcribe dengan faster-whisper
-        from faster_whisper import WhisperModel
-        model = WhisperModel('tiny', device='cpu', compute_type='int8')
-        segments, _ = model.transcribe(str(ogg_path), language='id')
-        text = " ".join([s.text for s in segments]).strip()
-        ogg_path.unlink(missing_ok=True)
-        return text
-    except Exception as e:
-        print(f"[!] Error transcribing voice: {e}")
-        return None
-
-def handle_text_or_voice_prompt(chat_id, user_text):
+def handle_text_prompt(chat_id, user_text):
     intent_data = ai_brain.parse_user_intent(user_text)
     reply_text, target_time = ai_brain.format_ai_response(intent_data)
     
-    # Buat Inline Keyboard Buttons jika intentnya adalah pembuatan klip
     keyboard = None
     if intent_data["intent"] == "create_clip" and target_time:
         keyboard = {
@@ -164,7 +134,6 @@ def handle_callback_query(cq):
     chat_id = cq["message"]["chat"]["id"]
     data = cq["data"]
     
-    # Jawaban popup telegram
     api_post("answerCallbackQuery", {"callback_query_id": cq_id, "text": "Perintah diterima!"})
     
     if data.startswith("render:"):
@@ -174,9 +143,8 @@ def handle_callback_query(cq):
             "text": f"⏳ *Memulai Produksi AI Clipper*\n• Gaya: *{style.upper()}*\n• Timestamp: `{t_point}`\n\nSedang memotong dan merender 1080p 60fps...",
             "parse_mode": "Markdown"
         })
-        # Eksekusi clipper di background
+        
         slug = f"ai_{style}_{int(time.time())}"
-        # Hitung range 50 detik
         p = t_point.split(":")
         if len(p) == 2:
             s_start = int(p[0]) * 60 + int(float(p[1]))
@@ -201,6 +169,12 @@ def handle_callback_query(cq):
         ])
     elif data == "cmd:status":
         handle_command(chat_id, "/status")
+    elif data == "cmd:clips":
+        handle_command(chat_id, "/clips")
+    elif data == "cmd:watch_on":
+        handle_command(chat_id, "/watch_on")
+    elif data == "cmd:watch_off":
+        handle_command(chat_id, "/watch_off")
 
 def handle_command(chat_id, text):
     parts = text.strip().split()
@@ -210,8 +184,8 @@ def handle_command(chat_id, text):
     if cmd in ("/start", "/help"):
         msg = (
             "🤖 *LUNA AI CONTENT STUDIO - COMMAND CENTER*\n\n"
-            "✨ *Fitur Spesial: Natural Language Prompting*\n"
-            "Kamu bisa langsung *chatting biasa* atau kirim *Voice Note*, contohnya:\n"
+            "✨ *Fitur Chat Bahasa Alami*\n"
+            "Ketik instruksi santai apa saja:\n"
             "• _\"Cariin momen pas Windah ngaku Jason\"_\n"
             "• _\"Potongin bagian parasut dong\"_\n"
             "• _\"Bikinin caption buat konten mandi\"_\n\n"
@@ -247,7 +221,7 @@ def handle_command(chat_id, text):
         msg = (
             "📊 *STATUS SISTEM LUNA AI*\n\n"
             f"• Auto-Watcher: {status_text}\n"
-            f"• AI Brain: 🟢 *Active (Whisper + Semantic Matcher)*\n"
+            f"• AI Brain: 🟢 *Active (Lightweight NLP Matcher)*\n"
             f"• Target Default: `Windah Basudara`\n"
             f"• Total Klip di Portal: `{total_clips} klip`\n"
             f"• Output Format: `1080x1920 60 FPS (Faststart)`\n\n"
@@ -310,7 +284,7 @@ def handle_command(chat_id, text):
         ])
 
 def run_bot_server():
-    print("=== Luna AI Telegram Command Center (Enhanced) Started ===")
+    print("=== Luna AI Telegram Command Center (Lightweight) Started ===")
     register_bot_commands()
     
     last_update_id = 0
@@ -333,15 +307,13 @@ def run_bot_server():
                         
                     chat_id = msg["chat"]["id"]
                     
-                    # 2. Handle Voice Note
-                    if "voice" in msg:
-                        api_post("sendMessage", {"chat_id": chat_id, "text": "🎙️ *Mendengarkan Voice Note kamu...*", "parse_mode": "Markdown"})
-                        voice_text = transcribe_voice_message(msg["voice"]["file_id"])
-                        if voice_text:
-                            api_post("sendMessage", {"chat_id": chat_id, "text": f"🗣️ *Transkrip Suara:* \"_{voice_text}_\"\n🤖 Sedang memproses...", "parse_mode": "Markdown"})
-                            handle_text_or_voice_prompt(chat_id, voice_text)
-                        else:
-                            api_post("sendMessage", {"chat_id": chat_id, "text": "⚠️ Gagal mengenali suara voice note."})
+                    # 2. Abaikan voice / audio jika dikirim
+                    if "voice" in msg or "audio" in msg:
+                        api_post("sendMessage", {
+                            "chat_id": chat_id, 
+                            "text": "ℹ️ *Fitur voice note dinonaktifkan*. Silakan ketik perintah langsung lewat teks chat santai atau slash command.",
+                            "parse_mode": "Markdown"
+                        })
                         continue
                         
                     # 3. Handle Teks
@@ -351,7 +323,7 @@ def run_bot_server():
                         if text.startswith("/"):
                             handle_command(chat_id, text)
                         else:
-                            handle_text_or_voice_prompt(chat_id, text)
+                            handle_text_prompt(chat_id, text)
                             
         except Exception as e:
             time.sleep(3)
