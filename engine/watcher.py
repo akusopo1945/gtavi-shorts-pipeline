@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GTA Shorts Auto-Watcher & Real-time Spike Clipper Daemon
-Memantau livestream YouTube -> Deteksi Chat Spike -> Auto-Clip -> Kirim Telegram
+GTA Shorts Smart Auto-Watcher & Rolling Ring-Buffer Spike Clipper Daemon.
+Live Stream -> Rolling 80s Ring Buffer + Live Chat Monitor -> Dual-Signal Spike + Context Rewind ->
+Whisper + Audio Peak Auto-FX/Title/Cutout Thumbnail -> Telegram + Web Portal.
 """
 
 import os
@@ -9,11 +10,12 @@ import sys
 import time
 import json
 import re
+import shutil
 import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from collections import Counter
+from collections import Counter, deque
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENGINE_DIR = BASE_DIR / "engine"
@@ -23,14 +25,12 @@ COOKIES_PATH = Path("/data/home/Downloads/www.youtube.com_cookies.txt")
 sys.path.insert(0, str(ENGINE_DIR))
 from telegram_bot import send_message, send_video
 
-# Kata kunci reaksi emosional penonton Indonesia & global
 HYPE_PATTERN = re.compile(
-    r"(?i:wkwk|ngakak|kocak|anjir|anjay|parah|mampus|rusuh|baper|bocil|mati|lmao|kekw|lol|omg|no way)|\bW+\b|[💀😂🤣😭🔥]"
+    r"(?i:wkwk|ngakak|kocak|anjir|anjay|parah|mampus|rusuh|baper|bocil|mati|lmao|kekw|lol|omg|no way|jason|polisi|prank|scam|kualat|ngamuk)|\bW+\b|[💀😂🤣😭🔥]"
 )
 NOISE_PATTERN = re.compile(
     r"(?i:giveaway|sponsor|subscribe|discord\.gg|https?://|promo code|follow me)"
 )
-WORD_PATTERN = re.compile(r"[\w']{2,}|[💀😂🤣😭🔥]")
 
 CHANNELS = {
     "windah": {
@@ -45,29 +45,29 @@ CHANNELS = {
     }
 }
 
-def check_live_status(channel_url):
-    """Cek apakah channel sedang LIVE via yt-dlp secara non-intrusif."""
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--print", "%(is_live)s|%(id)s|%(title)s",
-        "--skip-download",
-        channel_url
-    ]
-    if COOKIES_PATH.exists():
-        cmd.extend(["--cookies", str(COOKIES_PATH)])
-    if os.path.exists("/usr/local/bin/node"):
-        cmd.extend(["--js-runtimes", "node:/usr/local/bin/node"])
 
+def yt_dlp_base_args():
+    args = [sys.executable, "-m", "yt_dlp"]
+    if COOKIES_PATH.exists():
+        args.extend(["--cookies", str(COOKIES_PATH)])
+    if os.path.exists("/usr/local/bin/node"):
+        args.extend(["--js-runtimes", "node:/usr/local/bin/node"])
+    return args
+
+
+def check_live_status(channel_url):
+    cmd = yt_dlp_base_args() + ["--print", "%(is_live)s|%(id)s|%(title)s", "--skip-download", channel_url]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-        out = res.stdout.strip().split('\n')[-1]
+        out = res.stdout.strip().split("\n")[-1]
         if "|" in out:
             is_live, video_id, title = out.split("|", 2)
             if is_live.lower() in ("true", "1"):
                 return True, video_id, title
-    except Exception as e:
+    except Exception:
         pass
     return False, None, None
+
 
 def extract_chat_text(renderer):
     out = []
@@ -79,6 +79,7 @@ def extract_chat_text(renderer):
             out.append(e.get("emojiId") or (e.get("shortcuts") or [""])[0])
     return "".join(out).strip()
 
+
 class LiveMonitor:
     def __init__(self, streamer_key, video_id, title):
         self.streamer_key = streamer_key
@@ -87,34 +88,96 @@ class LiveMonitor:
         self.watch_url = f"https://www.youtube.com/watch?v={video_id}"
         self.job_dir = JOBS_DIR / f"live_{video_id}_{int(time.time())}"
         self.job_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.buf_dir = self.job_dir / "ring_buffer"
+        self.buf_dir.mkdir(parents=True, exist_ok=True)
+
         self.chat_pos = 0
         self.chat_buf = b""
         self.seen_msg_ids = set()
-        self.wgt_counter = Counter() # per unix second
+        self.wgt_counter = Counter()
+        self.recent_messages = deque(maxlen=60)  # (unix_ts, text)
         self.last_spike_time = 0
-        self.cooldown_sec = 240 # jeda 4 menit antar klip
+        self.cooldown_sec = 240
         self.clip_count = 0
+        self.chat_proc = None
+        self.buf_proc = None
+        self.last_buf_restart = 0
+
+    def resolve_stream_url(self):
+        cmd = yt_dlp_base_args() + ["-f", "301/300/best[ext=mp4]/best", "-g", self.watch_url]
+        return subprocess.check_output(cmd, text=True, timeout=30).strip().splitlines()[0]
 
     def start_chat_stream(self):
-        """Menjalankan background process yt-dlp untuk mendengarkan live chat."""
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
-            "--skip-download",
-            "--write-subs",
-            "--sub-langs", "live_chat",
+        cmd = yt_dlp_base_args() + [
+            "--skip-download", "--write-subs", "--sub-langs", "live_chat",
             "-o", str(self.job_dir / "chat"),
             self.watch_url
         ]
-        if COOKIES_PATH.exists():
-            cmd.extend(["--cookies", str(COOKIES_PATH)])
-        if os.path.exists("/usr/local/bin/node"):
-            cmd.extend(["--js-runtimes", "node:/usr/local/bin/node"])
+        self.chat_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"[*] Chat stream listener started (PID: {self.chat_proc.pid})")
 
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[*] Chat stream listener started (PID: {self.proc.pid})")
+    def start_ring_buffer(self):
+        """Continuously record rolling 10s .ts chunks (wrap=8 => last ~70-80s history) at ~0% CPU."""
+        if self.buf_proc and self.buf_proc.poll() is None:
+            return
+        now = time.time()
+        if now - self.last_buf_restart < 20:
+            return
+        self.last_buf_restart = now
+        try:
+            stream_url = self.resolve_stream_url()
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                "-i", stream_url,
+                "-c", "copy",
+                "-f", "segment", "-segment_time", "10", "-segment_wrap", "8",
+                "-reset_timestamps", "1",
+                str(self.buf_dir / "seg_%02d.ts")
+            ]
+            self.buf_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"[*] Rolling 80s ring-buffer recorder started (PID: {self.buf_proc.pid})")
+        except Exception as e:
+            print(f"[!] Ring-buffer start warning: {e}")
+
+    def snapshot_ring_buffer(self, out_mp4: Path, num_segments: int = 5) -> bool:
+        """Concatenate the last N completed .ts segments (gives ~35s context rewind + 15s aftermath)."""
+        now = time.time()
+        # Exclude segment written within last 1.2s (likely still being written)
+        segs = sorted(
+            [p for p in self.buf_dir.glob("seg_*.ts") if p.stat().st_size > 100_000 and (now - p.stat().st_mtime) > 1.2],
+            key=lambda p: p.stat().st_mtime
+        )
+        if len(segs) < 3:
+            return False
+
+        chosen = segs[-num_segments:]
+        concat_file = out_mp4.with_name("concat_list.txt")
+        lines = []
+        for s in chosen:
+            # Copy snapshot so ring buffer cannot overwrite while we concat
+            snap = out_mp4.with_name(f"snap_{s.name}")
+            shutil.copyfile(s, snap)
+            lines.append(f"file '{snap}'\n")
+        concat_file.write_text("".join(lines), encoding="utf-8")
+
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                 "-i", str(concat_file), "-c", "copy", "-movflags", "+faststart", str(out_mp4)],
+                check=True, timeout=45
+            )
+            return out_mp4.exists() and out_mp4.stat().st_size > 300_000
+        finally:
+            for f in out_mp4.parent.glob("snap_seg_*.ts"):
+                f.unlink(missing_ok=True)
+            concat_file.unlink(missing_ok=True)
 
     def poll_chat(self):
+        # Keep ring buffer alive if stream HLS refreshed
+        if not self.buf_proc or self.buf_proc.poll() is not None:
+            self.start_ring_buffer()
+
         chat_files = sorted(self.job_dir.glob("chat.live_chat.json*"))
         for cf in chat_files:
             try:
@@ -129,7 +192,7 @@ class LiveMonitor:
             self.chat_buf += data
             *lines, rest = self.chat_buf.split(b"\n")
             self.chat_buf = rest
-            
+
             for ln in lines:
                 try:
                     acts = json.loads(ln)["replayChatItemAction"]["actions"]
@@ -144,22 +207,20 @@ class LiveMonitor:
                     if not txt or NOISE_PATTERN.search(txt):
                         continue
                     now_s = int(time.time())
-                    # Hype words dapat bobot 3 poin, chat biasa 1 poin
                     weight = 3 if HYPE_PATTERN.search(txt) else 1
                     self.wgt_counter[now_s] += weight
+                    self.recent_messages.append((now_s, txt))
 
     def check_spike(self):
         now_s = int(time.time())
         if now_s - self.last_spike_time < self.cooldown_sec:
             return False, 0
-            
-        # Analisis 10 detik terakhir vs baseline 60 detik sebelumnya
+
         recent_10s = sum(self.wgt_counter.get(s, 0) for s in range(now_s - 10, now_s))
         baseline_60s = sum(self.wgt_counter.get(s, 0) for s in range(now_s - 70, now_s - 10))
         avg_baseline_10s = (baseline_60s / 6) if baseline_60s > 0 else 5
-        
+
         ratio = recent_10s / max(1.0, avg_baseline_10s)
-        # Spike terdeteksi jika chat tawa melonjak 2.8x lipat dan minimal ada 15 poin hype
         if ratio >= 2.8 and recent_10s >= 15:
             self.last_spike_time = now_s
             return True, ratio
@@ -168,88 +229,100 @@ class LiveMonitor:
     def trigger_auto_clip(self, ratio):
         self.clip_count += 1
         clip_id = f"{self.streamer_key}_live_clip_{self.clip_count}_{int(time.time())}"
-        print(f"\n[🔥] SPIKE DETECTED! (Ratio: {ratio:.1f}x) Producing clip: {clip_id}")
-        
-        send_message(
-            f"🔥 *[MOMEN VIRAL LIVE TERDETEKSI!]*\n"
-            f"Streamer: *{self.title}*\n"
-            f"Lonjakan Tawa: `{ratio:.1f}x dari baseline normal`\n"
-            f"⏳ Merekam 55 detik stream & render 1080p 60fps..."
-        )
-        
+        print(f"\n[🔥] SPIKE DETECTED! (Ratio: {ratio:.1f}x) -> Capturing context rewind for {clip_id}")
+
+        # Wait 12s so ring buffer finishes capturing reaction aftermath while keeping ~35s BEFORE spike
+        time.sleep(12)
+        self.poll_chat()
+
         clip_work = self.job_dir / clip_id
         clip_work.mkdir(parents=True, exist_ok=True)
         raw_video = clip_work / "raw.mp4"
-        
-        clipper_cmd = [
-            sys.executable, str(ENGINE_DIR / "clipper.py"),
-            "--id", clip_id,
-            "--streamer", self.streamer_key,
-            "--title", f"MOMEN SPONTAN LIVE GTA 6 #{self.clip_count}",
-            "--duration", "55.0",
-            "--summary", f"Momen viral lonjakan chat ({ratio:.1f}x) saat live stream GTA 6.",
-            "--copywriting", f"Momen spontan paling bikin ngakak pas live GTA 6! Chat langsung jebol spam wkwk 😂🔥 #gta6 #shorts #gamingindo",
-            "--workdir", str(clip_work)
-        ]
-        
+        chat_json = clip_work / "chat_context.json"
+
+        recent_texts = [t for _, t in list(self.recent_messages)[-40:]]
+        chat_json.write_text(json.dumps(recent_texts, ensure_ascii=False), encoding="utf-8")
+
         try:
-            # 1. Dapatkan live stream URL (HLS m3u8) langsung via yt-dlp
-            print("[*] Resolving live stream HLS URL via yt-dlp...")
-            get_url_cmd = [
-                sys.executable, "-m", "yt_dlp",
-                "-f", "301/300/best[ext=mp4]/best",
-                "-g", self.watch_url
+            got_buffer = self.snapshot_ring_buffer(raw_video, num_segments=5)
+            if got_buffer:
+                print(f"[+] Context-rewound slice extracted from ring buffer: {raw_video}")
+            else:
+                print("[*] Ring buffer warming up -> fallback direct 48s record...")
+                stream_url = self.resolve_stream_url()
+                subprocess.run(
+                    ["ffmpeg", "-y", "-t", "48", "-i", stream_url, "-c", "copy", str(raw_video)],
+                    check=True, timeout=90
+                )
+
+            clipper_cmd = [
+                sys.executable, str(ENGINE_DIR / "clipper.py"),
+                "--id", clip_id,
+                "--streamer", self.streamer_key,
+                "--duration", "50.0",
+                "--auto-fx",
+                "--chat-json", str(chat_json),
+                "--workdir", str(clip_work)
             ]
-            if COOKIES_PATH.exists():
-                get_url_cmd.extend(["--cookies", str(COOKIES_PATH)])
-            if os.path.exists("/usr/local/bin/node"):
-                get_url_cmd.extend(["--js-runtimes", "node:/usr/local/bin/node"])
-                
-            stream_url = subprocess.check_output(get_url_cmd, text=True, timeout=30).strip()
-            
-            # 2. Rekam 55 detik stream via FFmpeg copy
-            print(f"[*] Recording 55 seconds live slice to {raw_video}...")
-            ffmpeg_dl_cmd = [
-                "ffmpeg", "-y",
-                "-t", "55",
-                "-i", stream_url,
-                "-c", "copy",
-                str(raw_video)
-            ]
-            subprocess.run(ffmpeg_dl_cmd, check=True, timeout=90)
-            print("[+] Live slice successfully recorded!")
-            
-            # 3. Jalankan render engine clipper
-            print("[*] Running declarative clipper pipeline...")
-            subprocess.run(clipper_cmd, check=True, timeout=180)
-            
+            print("[*] Running Golden Formula Auto-FX + Quality Gate pipeline...")
+            res = subprocess.run(clipper_cmd, timeout=240)
+
+            if res.returncode == 2:
+                print(f"[SKIP] Quality Gate filtered false-alarm chat spike #{self.clip_count} (streamer diam/monoton).")
+                shutil.rmtree(clip_work, ignore_errors=True)
+                return
+            if res.returncode != 0:
+                raise RuntimeError(f"clipper.py exited with code {res.returncode}")
+
+            analysis = {}
+            a_file = clip_work / "analysis.json"
+            if a_file.exists():
+                analysis = json.loads(a_file.read_text(encoding="utf-8"))
+
+            final_title = analysis.get("title", f"MOMEN KOCAK GTA 6 #{self.clip_count}")
+            transcript_prev = analysis.get("transcript_preview", "")
+            sfx_str = analysis.get("sfx_list", "")
             rendered_video = clip_work / f"{clip_id}_rendered.mp4"
-            thumb_path = clip_work / "thumb.jpg"
-            
+            portal_thumb = Path(f"/data/html/clips/files/{clip_id}/thumb_cutout.jpg")
+
             if rendered_video.exists():
                 send_video(
                     str(rendered_video),
-                    caption=f"🎬 *Momen Live #{self.clip_count} Berhasil Diproduksi!* 🔥\n\n"
-                            f"📌 Title: MOMEN SPONTAN LIVE GTA 6 #{self.clip_count}\n"
-                            f"⏱️ Resolusi: 1080x1920 (60 FPS)\n"
-                            f"🔗 Web: https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/",
-                    thumb_path=str(thumb_path) if thumb_path.exists() else None
+                    caption=(
+                        f"🎬 *{final_title}* 🔥\n\n"
+                        f"🗣️ _\"{transcript_prev[:140]}...\"_\n"
+                        f"⚡ FX: Snap Zoom 1.5x, Shake/Flash, Auto SFX (`{sfx_str}`), Cutout Cover\n"
+                        f"📊 Chat Spike: `{ratio:.1f}x` | Rewind Context: `✅`\n"
+                        f"🔗 Portal: https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"
+                    ),
+                    thumb_path=str(portal_thumb) if portal_thumb.exists() else None
                 )
-                print(f"[+] Klip #{self.clip_count} berhasil dikirim ke Telegram!")
+                print(f"[+] Smart Auto-Clip '{final_title}' sent to Telegram!")
         except Exception as e:
             print(f"[!] Error producing auto-clip: {e}")
             send_message(f"⚠️ Gagal render auto-clip #{self.clip_count}: `{e}`")
 
     def stop(self):
-        if hasattr(self, 'proc') and self.proc:
-            self.proc.terminate()
-            self.proc.wait()
+        for p in (self.chat_proc, self.buf_proc):
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except Exception:
+                    p.kill()
+
 
 def run_watcher_loop(streamer_target="windah"):
     cfg = CHANNELS.get(streamer_target, CHANNELS["windah"])
-    print(f"=== Auto-Watcher Daemon Active: {cfg['name']} ===")
-    send_message(f"🤖 *Auto-Watcher Luna Aktif!*\\nMemantau livestream: *{cfg['name']}* secara real-time.")
-    
+    print(f"=== Smart Auto-Watcher Daemon Active: {cfg['name']} ===")
+    send_message(
+        f"🤖 *Smart Auto-Watcher v2 Aktif!*\n"
+        f"Memantau: *{cfg['name']}*\n"
+        f"✅ 80s Rolling Ring-Buffer (Context Rewind)\n"
+        f"✅ Dual-Signal Filter (Chat Spike + Audio Peak)\n"
+        f"✅ Auto-Title, Styled Subs, Zoom/Shake/Flash, SFX & Cutout Cover"
+    )
+
     active_monitor = None
     try:
         while True:
@@ -260,24 +333,25 @@ def run_watcher_loop(streamer_target="windah"):
                     send_message(
                         f"🔴 *STREAMER SEDANG LIVE!* 🎮\n"
                         f"Judul: *{title}*\n"
-                        f"🚀 Menjalankan detektor tawa real-time..."
+                        f"🚀 Menjalankan 80s Rolling Buffer + Dual-Signal Detector..."
                     )
                     active_monitor = LiveMonitor(streamer_target, vid_id, title)
                     active_monitor.start_chat_stream()
+                    active_monitor.start_ring_buffer()
                 else:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {cfg['name']} is offline. Polling in 60s...", end="\r")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {cfg['name']} offline. Poll 60s...", end="\r")
                     time.sleep(60)
             else:
                 active_monitor.poll_chat()
                 is_spike, ratio = active_monitor.check_spike()
                 if is_spike:
                     active_monitor.trigger_auto_clip(ratio)
-                    
                 time.sleep(2)
     except KeyboardInterrupt:
         print("\nStopping watcher...")
         if active_monitor:
             active_monitor.stop()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

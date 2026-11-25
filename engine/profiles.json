@@ -14,9 +14,9 @@
   "tara": {
     "name": "Tara Arts Game Indonesia",
     "badge_color": "bg-amber-600 text-white",
-    "facecam_normal": "crop=440:330:30:30,scale=1080:820:flags=lanczos,unsharp=5:5:0.8:5:5:0.0",
-    "facecam_zoom": "crop=300:225:100:80,scale=1080:820:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
-    "gameplay": "crop=1440:1080:480:0,scale=1080:980:flags=lanczos,unsharp=5:5:0.6:5:5:0.0",
+    "facecam_normal": "crop=238:180:1627:578,scale=1080:820:flags=lanczos,unsharp=5:5:0.8:5:5:0.0",
+    "facecam_zoom": "crop=190:144:1651:596,scale=1080:820:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
+    "gameplay": "crop=1440:1080:0:0,scale=1080:980:flags=lanczos,unsharp=5:5:0.6:5:5:0.0",
     "seam_color_top": "0xf59e0b",
     "seam_color_bottom": "0x10b981",
     "seam_color_bg": "0x0f172a",

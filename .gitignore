@@ -10,3 +10,10 @@ test/
 *.part
 !docs/*.mp4
 .env
+
+# Runtime & logs
+.job_stage.json
+.render_progress.txt
+.watcher.pid
+*.log
+cookies*.txt
