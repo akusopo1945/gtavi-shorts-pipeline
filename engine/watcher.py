@@ -23,7 +23,8 @@ JOBS_DIR = BASE_DIR / "jobs"
 COOKIES_PATH = Path("/data/home/Downloads/www.youtube.com_cookies.txt")
 
 sys.path.insert(0, str(ENGINE_DIR))
-from telegram_bot import send_message, send_video
+from telegram_bot import load_env, send_message, send_video
+PORTAL_URL = load_env().get("PORTAL_URL", os.getenv("PORTAL_URL", "https://your-portal-host/clips/"))
 
 HYPE_PATTERN = re.compile(
     r"(?i:wkwk|ngakak|kocak|anjir|anjay|parah|mampus|rusuh|baper|bocil|mati|lmao|kekw|lol|omg|no way|jason|polisi|prank|scam|kualat|ngamuk)|\bW+\b|[💀😂🤣😭🔥]"
@@ -293,7 +294,7 @@ class LiveMonitor:
                         f"🗣️ _\"{transcript_prev[:140]}...\"_\n"
                         f"⚡ FX: Snap Zoom 1.5x, Shake/Flash, Auto SFX (`{sfx_str}`), Cutout Cover\n"
                         f"📊 Chat Spike: `{ratio:.1f}x` | Rewind Context: `✅`\n"
-                        f"🔗 Portal: https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"
+                        f"🔗 Portal: {PORTAL_URL}"
                     ),
                     thumb_path=str(portal_thumb) if portal_thumb.exists() else None
                 )

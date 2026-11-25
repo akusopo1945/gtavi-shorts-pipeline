@@ -138,7 +138,7 @@ flowchart TD
 
 ### Step 5: Web Portal Delivery (2-Column Studio List)
 - Seluruh aset langsung dipublish ke web portal:
-  👉 `https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/`
+  👉 `$PORTAL_URL` (dikonfigurasi di `.env`, misal `https://<your-instabox-host>/clips/`)
 - **Arsitektur Layout Studio**:
   - **Kolom Kiri (Sticky Player)**: Player video vertikal 9:16, info momen & tag SFX, tombol download 1-klik dengan ukuran file, dan box copywriting lengkap dengan tombol salin instan.
   - **Kolom Kanan (List Klip Vertikal)**: Daftar kartu video terurut dari yang paling baru di paling atas. Dilengkapi filter cepat (*Semua, Tara Arts, Windah Basudara*), badge durasi, ukuran, dan status indikator pemutaran aktif.

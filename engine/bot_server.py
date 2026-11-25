@@ -40,7 +40,7 @@ def load_env():
 ENV = load_env()
 TOKEN = ENV.get("TELEGRAM_BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
-PORTAL_URL = "https://8080-agq23kqdsijuyyvfkrqpswhfru.instabox.tech/clips/"
+PORTAL_URL = ENV.get("PORTAL_URL", "https://your-portal-host/clips/")
 
 HTTP_SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=2)
